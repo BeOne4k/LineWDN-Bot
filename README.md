@@ -1,6 +1,6 @@
 # Loyalty LINE Bot
 
-Full-featured LINE Messaging API bot for WeedeN loyalty program.
+Full-featured LINE Messaging API bot with loyalty program.
 
 ## Features
 
