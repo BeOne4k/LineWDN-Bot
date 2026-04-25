@@ -1,86 +1,76 @@
-// src/handler.js
-
 const { getSession, setSession } = require('./store');
 const msgs = require('./messages');
-const { findNearby, getStoreById, REGIONS } = require('./stores');
+const { findNearby, REGIONS } = require('./stores');
 
-// ─── utils ───────────────────────────────────────────────
 function safeMessages(...items) {
-  return items
-    .flat(Infinity)
-    .filter(m => m && typeof m === 'object' && m.type);
+  return items.flat(Infinity).filter(m => m && typeof m === 'object');
 }
 
-// FIXED reply (stable + fallback)
 async function reply(client, token, event, ...items) {
   const messages = safeMessages(...items);
-
   if (!messages.length) return;
 
-  // 1. normal reply
-  if (token) {
-    try {
+  try {
+    if (token) {
       return await client.replyMessage(token, messages);
+    }
+  } catch (e) {
+    console.error('reply failed:', e.message);
+  }
+
+  console.log('No replyToken → skip (NO PUSH IN CHAT FLOW)');
+}
+
+async function handleEvent(event, client) {
+  console.log("🔥 MICRO BOT EVENT:");
+  console.log(JSON.stringify(event, null, 2));
+
+  const userId = event.source?.userId;
+  const replyToken = event.replyToken;
+
+  console.log("USER:", userId);
+  console.log("REPLY TOKEN:", replyToken);
+  console.log("MODE:", event.mode);
+
+  // ❗ пробуем только replyMessage если есть token
+  if (replyToken) {
+    try {
+      await client.replyMessage(replyToken, {
+        type: "text",
+        text: "👋 micro bot replyMessage works"
+      });
+
+      console.log("✅ replyMessage SUCCESS");
+      return;
     } catch (err) {
-      console.error("replyMessage failed:", err.message);
+      console.error("❌ replyMessage FAILED:", err.message);
     }
   }
 
-  // 2. fallback push
-  const userId = event?.source?.userId;
-
+  // fallback push
   if (userId) {
     try {
-      console.log("➡️ pushMessage fallback:", userId);
-      return await client.pushMessage(userId, messages);
+      await client.pushMessage(userId, {
+        type: "text",
+        text: "📨 micro bot pushMessage works"
+      });
+
+      console.log("✅ pushMessage SUCCESS");
     } catch (err) {
-      console.error("pushMessage failed:", err.message);
+      console.error("❌ pushMessage FAILED:", err.message);
     }
-  }
-
-  console.log("❌ No replyToken and no userId");
-}
-
-// ─── MAIN HANDLER ───────────────────────────────────────
-async function handleEvent(event, client) {
-  try {
-    console.log("EVENT:", JSON.stringify(event, null, 2));
-
-    const type = event.type;
-
-    if (type === 'message') {
-      const msgType = event.message?.type;
-
-      if (msgType === 'text') return onText(event, client);
-      if (msgType === 'location') return onLocation(event, client);
-
-      console.log("Unsupported message type:", msgType);
-      return;
-    }
-
-    if (type === 'follow') return onFollow(event, client);
-    if (type === 'postback') return onPostback(event, client);
-
-  } catch (err) {
-    console.error("🔥 HANDLE ERROR:", err);
   }
 }
 
-// ─── FOLLOW ─────────────────────────────────────────────
 async function onFollow(event, client) {
   const userId = event.source.userId;
+  setSession(userId, { step: 'MENU' });
 
-  setSession(userId, { step: 'SELECT_LANG' });
-
-  return reply(
-    client,
-    event.replyToken,
-    event,
+  return reply(client, event.replyToken, event,
     msgs.languageSelectorMessage()
   );
 }
 
-// ─── TEXT ───────────────────────────────────────────────
 async function onText(event, client) {
   const userId = event.source.userId;
   const text = event.message.text.trim();
@@ -94,158 +84,66 @@ async function onText(event, client) {
 
     setSession(userId, { lang: newLang, step: 'MENU' });
 
-    return reply(
-      client,
-      event.replyToken,
-      event,
+    return reply(client, event.replyToken, event,
       { type: 'text', text: msgs.t(newLang, 'languageSet') },
       msgs.welcomeMessage(newLang)
     );
   }
 
   if (text === 'MENU') {
-    setSession(userId, { step: 'MENU' });
-
-    return reply(
-      client,
-      event.replyToken,
-      event,
+    return reply(client, event.replyToken, event,
       msgs.welcomeMessage(lang)
-    );
-  }
-
-  if (text === 'LOYALTY') {
-    setSession(userId, { step: 'LOYALTY_INTRO' });
-
-    return reply(
-      client,
-      event.replyToken,
-      event,
-      msgs.loyaltyIntroMessage(lang)
-    );
-  }
-
-  if (text === 'START_LOYALTY') {
-    setSession(userId, { step: 'ASK_PHONE' });
-
-    return reply(
-      client,
-      event.replyToken,
-      event,
-      { type: 'text', text: msgs.t(lang, 'askPhone') }
     );
   }
 
   if (text === 'SELECT_REGION') {
     const regions = Object.keys(REGIONS);
 
-    return reply(
-      client,
-      event.replyToken,
-      event,
-      {
-        type: 'text',
-        text: msgs.t(lang, 'selectRegion'),
-        quickReply: msgs.quickReplies(
-          regions.map(r => ({
+    return reply(client, event.replyToken, event, {
+      type: 'text',
+      text: msgs.t(lang, 'selectRegion'),
+      quickReply: {
+        items: regions.map(r => ({
+          type: 'action',
+          action: {
             type: 'message',
             label: r,
             text: `REGION:${r}`
-          }))
-        )
+          }
+        }))
       }
-    );
+    });
   }
 
   if (text.startsWith('REGION:')) {
     const region = text.split(':')[1];
     const coords = REGIONS[region];
 
-    if (!coords) {
-      return reply(
-        client,
-        event.replyToken,
-        event,
-        { type: 'text', text: msgs.t(lang, 'error') }
-      );
-    }
+    if (!coords) return;
 
-    return showNearbyStores(
-      userId,
-      coords.lat,
-      coords.lng,
-      lang,
-      client,
-      event.replyToken,
-      event
-    );
+    return showNearby(client, event, coords, lang);
   }
 
-  return reply(
-    client,
-    event.replyToken,
-    event,
+  return reply(client, event.replyToken, event,
     msgs.welcomeMessage(lang)
   );
 }
 
-// ─── LOCATION ───────────────────────────────────────────
-async function onLocation(event, client) {
-  const userId = event.source.userId;
-  const s = getSession(userId);
-
-  return showNearbyStores(
-    userId,
-    event.message.latitude,
-    event.message.longitude,
-    s.lang || 'en',
-    client,
-    event.replyToken,
-    event
-  );
-}
-
-// ─── NEARBY ─────────────────────────────────────────────
-async function showNearbyStores(userId, lat, lng, lang, client, token, event) {
-  const nearby = await findNearby(lat, lng, 3);
+async function showNearby(client, event, coords, lang) {
+  const nearby = await findNearby(coords.lat, coords.lng, 3);
 
   if (!nearby.length) {
-    return reply(
-      client,
-      token,
-      event,
-      { type: 'text', text: msgs.t(lang, 'noStoresFound') }
-    );
+    return reply(client, event.replyToken, event, {
+      type: 'text',
+      text: msgs.t(lang, 'noStoresFound')
+    });
   }
-
-  const messages = nearby
-    .slice(0, 3)
-    .flatMap(s => msgs.storeCardMessage(lang, s));
-
-  return reply(client, token, event, ...messages);
-}
-
-// ─── FOLLOW / POSTBACK ──────────────────────────────────
-async function onFollow(event, client) {
-  const userId = event.source.userId;
-
-  setSession(userId, { step: 'SELECT_LANG' });
 
   return reply(
     client,
     event.replyToken,
     event,
-    msgs.languageSelectorMessage()
-  );
-}
-
-async function onPostback(event, client) {
-  const data = event.postback?.data;
-  if (!data) return;
-
-  await onText(
-    { ...event, message: { type: 'text', text: data } },
-    client
+    ...nearby.flatMap(s => msgs.storeCardMessage(lang, s))
   );
 }
 
